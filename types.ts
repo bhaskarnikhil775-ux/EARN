@@ -4,6 +4,7 @@ export interface User {
   coins: number;
   isNewUser: boolean;
   signupDate: number;
+  lastCheckIn?: string; // ISO Date String YYYY-MM-DD
 }
 
 export interface DailyStats {

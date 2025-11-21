@@ -1,9 +1,10 @@
+
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { AdOverlay } from './components/AdOverlay';
 import { ScratchCard } from './components/ScratchCard';
 import { SpinWheel } from './components/SpinWheel';
-import { storage } from './services/storage';
+import { storage, getTodayString } from './services/storage';
 import { User, Tab, View, DailyStats, Transaction } from './types';
 import { APP_CONSTANTS, WITHDRAWAL_OPTIONS, WITHDRAWAL_TYPES, LEGAL_CONTENT, LOGO_URLS } from './constants';
 import { auth, googleProvider } from './firebaseConfig';
@@ -87,7 +88,7 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // --- MANUAL CONTROL SYNC LOGIC (Firebase Polling) ---
+  // --- MANUAL CONTROL SYNC LOGIC ---
   useEffect(() => {
     if (!user) return;
 
@@ -110,7 +111,6 @@ const App = () => {
            if (rejectedTxs.length > 0) {
              let totalRefund = 0;
              rejectedTxs.forEach(tx => {
-               // Refund logic based on amount
                let coinsToRefund = 900;
                if (tx.amount === 15) coinsToRefund = tx.title.includes('UPI') ? 900 : 1500;
                if (tx.amount === 50) coinsToRefund = tx.title.includes('UPI') ? 4500 : 7500;
@@ -152,7 +152,6 @@ const App = () => {
       }
     };
 
-    // Check every 10 seconds
     const interval = setInterval(checkStatus, 10000);
     return () => clearInterval(interval);
   }, [user, historyVersion]);
@@ -211,6 +210,26 @@ const App = () => {
      } finally {
        setIsSigningIn(false);
      }
+  };
+
+  // Fallback Login for Preview Environment where real Google Login is blocked
+  const handleDevLogin = () => {
+    const devEmail = `demo${Math.floor(Math.random() * 1000)}@test.com`;
+    const deviceId = "dev_preview_" + Math.random();
+    
+    const devUser: User = {
+      email: devEmail,
+      deviceId: deviceId,
+      coins: APP_CONSTANTS.SIGNUP_BONUS,
+      isNewUser: true,
+      signupDate: Date.now()
+    };
+    
+    storage.setDeviceId(deviceId);
+    storage.saveUser(devUser);
+    storage.setSessionActive(true);
+    setUser(devUser);
+    showToast("Preview Mode: Logged in as Demo User");
   };
 
   const handleLogout = () => {
@@ -356,11 +375,11 @@ const App = () => {
             )}
           </button>
 
-          {/* Fallback Login for Preview (Visible only if multiple errors occur) */}
-          {loginErrorCount > 2 && (
-             <div className="mt-4 text-center">
-               <p className="text-red-400 text-xs mb-2">Login issues? Check Firebase settings.</p>
-             </div>
+          {/* Fallback Login for Preview/Dev Mode */}
+          {loginErrorCount > 0 && (
+             <button onClick={handleDevLogin} className="text-yellow-500 text-sm underline mt-2">
+               Dev Login (Test Mode)
+             </button>
           )}
           
           <p className="text-xs text-slate-600 mt-8">By continuing, you agree to our Terms & Privacy Policy</p>
@@ -498,4 +517,315 @@ const App = () => {
 
       {activeTab === Tab.WALLET && (
         <div className="p-5 pb-24">
-           <h2 className="text-2xl
+           <h2 className="text-2xl font-bold text-white mb-6">Wallet</h2>
+           
+           <div className="bg-gradient-to-r from-slate-800 to-slate-900 p-6 rounded-2xl border border-slate-700 text-center mb-8 relative overflow-hidden">
+             <div className="absolute top-0 right-0 p-4 opacity-10">
+                <Coins size={100} className="text-white"/>
+             </div>
+             <span className="text-slate-400 text-sm relative z-10">Current Balance</span>
+             <div className="text-4xl font-black text-yellow-400 mt-2 flex justify-center items-center gap-2 relative z-10">
+               <Coins className="w-8 h-8" /> {user.coins}
+             </div>
+             <span className="text-slate-500 text-xs block mt-2 relative z-10">Redeem your coins for Cash</span>
+           </div>
+
+           <h3 className="text-white font-bold mb-4">Withdraw Methods</h3>
+           <div className="space-y-4">
+             <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="bg-white p-1 rounded">
+                    <img src={LOGO_URLS.UPI} alt="UPI Logo" className="w-8 h-5 object-contain" />
+                  </div>
+                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">BHIM UPI</h4>
+                </div>
+                <div className="grid gap-3">
+                    {WITHDRAWAL_OPTIONS.filter(o => o.type === WITHDRAWAL_TYPES.UPI).map((opt) => (
+                        <button 
+                            key={opt.id}
+                            onClick={() => handleOptionClick(opt)}
+                            className="bg-slate-800 hover:bg-slate-750 p-3 rounded-xl border border-slate-700 flex justify-between items-center group transition-all active:scale-95"
+                        >
+                            <div className="flex items-center gap-3">
+                                <div className="w-12 h-12 bg-white rounded-xl p-1.5 flex items-center justify-center overflow-hidden shrink-0">
+                                    <img src={opt.icon} alt="UPI" className="w-full h-full object-contain" />
+                                </div>
+                                <div className="text-left">
+                                    <p className="text-white font-bold text-sm">{opt.label}</p>
+                                    <p className="text-yellow-500 text-xs font-mono">{opt.coins} Coins</p>
+                                </div>
+                            </div>
+                            <div className="bg-slate-700 px-3 py-1 rounded text-xs text-white font-medium">Redeem</div>
+                        </button>
+                    ))}
+                </div>
+             </div>
+
+             <div className="mt-6">
+                <div className="flex items-center gap-2 mb-3">
+                   <div className="bg-white p-1 rounded">
+                     <img src={LOGO_URLS.PLAY} alt="Play Logo" className="w-6 h-6 object-contain" />
+                   </div>
+                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Google Play</h4>
+                </div>
+                <div className="grid gap-3">
+                    {WITHDRAWAL_OPTIONS.filter(o => o.type === WITHDRAWAL_TYPES.GIFT_CARD).map((opt) => (
+                        <button 
+                            key={opt.id}
+                            onClick={() => handleOptionClick(opt)}
+                            className="bg-slate-800 hover:bg-slate-750 p-3 rounded-xl border border-slate-700 flex justify-between items-center group transition-all active:scale-95"
+                        >
+                             <div className="flex items-center gap-3">
+                                <div className="w-12 h-12 bg-white rounded-xl p-2 flex items-center justify-center overflow-hidden shrink-0">
+                                    <img src={opt.icon} alt="Play Store" className="w-full h-full object-contain" />
+                                </div>
+                                <div className="text-left">
+                                    <p className="text-white font-bold text-sm">{opt.label}</p>
+                                    <p className="text-yellow-500 text-xs font-mono">{opt.coins} Coins</p>
+                                </div>
+                            </div>
+                            <div className="bg-slate-700 px-3 py-1 rounded text-xs text-white font-medium">Redeem</div>
+                        </button>
+                    ))}
+                </div>
+             </div>
+           </div>
+        </div>
+      )}
+
+      {activeTab === Tab.HISTORY && (
+        <div className="p-5 pb-24">
+           <h2 className="text-2xl font-bold text-white mb-6">Transactions</h2>
+           <div className="space-y-3">
+             {storage.getHistory().map((tx) => (
+               <div key={tx.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-full ${tx.type === 'WITHDRAW' ? 'bg-red-500/20 text-red-500' : 'bg-green-500/20 text-green-500'}`}>
+                      {tx.type === 'WITHDRAW' ? <Coins className="w-4 h-4 rotate-180" /> : <Coins className="w-4 h-4" />}
+                    </div>
+                    <div>
+                      <p className="text-white font-medium text-sm">{tx.title}</p>
+                      <p className="text-slate-500 text-[10px]">
+                        {new Date(tx.timestamp).toLocaleString()}
+                      </p>
+                      {tx.details && <p className="text-xs text-slate-400 mt-0.5">{tx.details}</p>}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className={`font-bold block ${tx.type === 'WITHDRAW' ? 'text-red-400' : 'text-green-400'}`}>
+                        {tx.type === 'WITHDRAW' ? '-' : '+'}{tx.amount}
+                    </span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${tx.status === 'SUCCESS' ? 'bg-green-500/10 text-green-500' : tx.status === 'FAILED' ? 'bg-red-500/10 text-red-500' : 'bg-yellow-500/10 text-yellow-500'}`}>
+                        {tx.status}
+                    </span>
+                  </div>
+               </div>
+             ))}
+             {storage.getHistory().length === 0 && (
+               <div className="text-center text-slate-500 mt-10">No transactions yet.</div>
+             )}
+           </div>
+        </div>
+      )}
+
+      {activeTab === Tab.PROFILE && (
+        <div className="p-5 pb-24">
+           <div className="text-center mb-8 mt-4">
+             <div className="w-20 h-20 bg-slate-800 border-2 border-slate-700 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl shadow-xl">
+               <span className="text-2xl font-bold text-slate-400">{user.email.charAt(0).toUpperCase()}</span>
+             </div>
+             <h2 className="text-white font-bold truncate px-4">{user.email}</h2>
+             <p className="text-slate-500 text-xs font-mono mt-1">ID: {user.deviceId}</p>
+           </div>
+
+           <div className="space-y-3">
+              <div className="bg-slate-800 p-4 rounded-xl flex justify-between border border-slate-700 mb-6">
+                <span className="text-slate-300 text-sm">Coins Earned Today</span>
+                <span className="text-yellow-400 font-bold">{stats.coinsEarnedToday}</span>
+              </div>
+              
+              <h4 className="text-slate-500 text-xs font-bold uppercase tracking-wider ml-1">Info & Support</h4>
+              
+              <button onClick={() => setInfoModal({title: 'Terms & Conditions', content: LEGAL_CONTENT.TERMS})} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
+                 <div className="flex items-center gap-3"><FileText size={18} className="text-slate-400"/> Terms & Conditions</div>
+                 <ChevronRight size={16} className="text-slate-500" />
+              </button>
+
+              <button onClick={() => setInfoModal({title: 'Privacy Policy', content: LEGAL_CONTENT.PRIVACY})} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
+                 <div className="flex items-center gap-3"><Shield size={18} className="text-slate-400"/> Privacy Policy</div>
+                 <ChevronRight size={16} className="text-slate-500" />
+              </button>
+
+              <button onClick={() => setInfoModal({title: 'FAQs', content: LEGAL_CONTENT.FAQ})} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
+                 <div className="flex items-center gap-3"><HelpCircle size={18} className="text-slate-400"/> FAQs</div>
+                 <ChevronRight size={16} className="text-slate-500" />
+              </button>
+
+              <a href={APP_CONSTANTS.TELEGRAM_LINK} target="_blank" rel="noreferrer" className="w-full bg-[#229ED9]/10 border border-[#229ED9]/30 p-4 rounded-xl flex items-center justify-between text-[#229ED9] text-sm hover:bg-[#229ED9]/20 mt-4">
+                 <div className="flex items-center gap-3"><Send size={18} /> Contact Support (Telegram)</div>
+                 <ChevronRight size={16} />
+              </a>
+
+              <a href={`mailto:${APP_CONSTANTS.EMAIL_SUPPORT}`} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
+                 <div className="flex items-center gap-3"><Mail size={18} className="text-slate-400"/> Email Support</div>
+                 <ChevronRight size={16} className="text-slate-500" />
+              </a>
+
+              <button onClick={handleLogout} className="w-full text-red-500 p-4 rounded-xl flex items-center justify-center gap-2 mt-4 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 transition-all">
+                <LogOut size={18} /> Logout
+              </button>
+           </div>
+        </div>
+      )}
+
+      <AnimatePresence>
+        {withdrawalStep === 'INSUFFICIENT' && (
+          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-slate-900 w-full max-w-xs p-6 rounded-2xl border border-red-500/30 text-center"
+            >
+              <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                <AlertTriangle className="w-8 h-8 text-red-500" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Not Enough Coins</h3>
+              <p className="text-slate-400 text-sm mb-6">
+                You need <span className="text-yellow-400 font-bold">{selectedOption?.coins} coins</span> to redeem this reward.
+              </p>
+              
+              <div className="space-y-3">
+                <button 
+                  onClick={() => {
+                    setWithdrawalStep('NONE');
+                    setSelectedOption(null);
+                    setActiveTab(Tab.HOME);
+                  }}
+                  className="w-full py-3 rounded-xl bg-gradient-to-r from-yellow-500 to-orange-500 text-black font-bold shadow-lg animate-pulse"
+                >
+                  Earn More Coins
+                </button>
+                <button 
+                  onClick={() => {
+                    setWithdrawalStep('NONE');
+                    setSelectedOption(null);
+                  }}
+                  className="w-full py-3 rounded-xl bg-slate-800 text-slate-400 font-bold"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {withdrawalStep === 'INPUT' && selectedOption && (
+          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+            <motion.div 
+               initial={{ scale: 0.9, opacity: 0 }}
+               animate={{ scale: 1, opacity: 1 }}
+               exit={{ scale: 0.9, opacity: 0 }}
+               className="bg-slate-900 w-full max-w-xs p-6 rounded-2xl border border-slate-700"
+            >
+              <h3 className="text-xl font-bold text-white mb-2">Redeem {selectedOption.label}</h3>
+              <p className="text-slate-400 text-xs mb-4">Enter your details correctly. We are not responsible for wrong inputs.</p>
+              
+              <div className="mb-6">
+                <label className="text-slate-400 text-xs block mb-1 font-bold uppercase tracking-wider">
+                   Payment Address
+                </label>
+                <input 
+                  type="text" 
+                  value={withdrawalInput}
+                  placeholder="Enter Payment Address (UPI/Email)"
+                  className="w-full bg-slate-800 text-white p-3 rounded-lg border border-slate-700 focus:border-yellow-500 outline-none"
+                  onChange={(e) => setWithdrawalInput(e.target.value)}
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => { setWithdrawalStep('NONE'); setSelectedOption(null); }}
+                  className="flex-1 py-3 rounded-xl bg-slate-800 text-white font-bold"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleInputNext}
+                  className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-bold"
+                >
+                  Next
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {withdrawalStep === 'CONFIRM' && selectedOption && (
+           <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+            <motion.div 
+               initial={{ scale: 0.9, opacity: 0 }}
+               animate={{ scale: 1, opacity: 1 }}
+               exit={{ scale: 0.9, opacity: 0 }}
+               className="bg-slate-900 w-full max-w-xs p-6 rounded-2xl border border-yellow-500/50 text-center"
+            >
+              <h3 className="text-lg font-bold text-white mb-4">Confirm Details</h3>
+              
+              <div className="bg-slate-800 p-3 rounded-lg mb-4 text-left">
+                <p className="text-slate-500 text-xs">Withdraw Method</p>
+                <p className="text-white font-medium">{selectedOption.label}</p>
+                <div className="h-px bg-slate-700 my-2"/>
+                <p className="text-slate-500 text-xs">Payment Address</p>
+                <p className="text-yellow-400 font-mono font-bold break-all">{withdrawalInput}</p>
+              </div>
+
+              <p className="text-slate-400 text-xs mb-6">
+                Is this information correct? Coins will be deducted immediately.
+              </p>
+
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setWithdrawalStep('INPUT')}
+                  className="flex-1 py-3 rounded-xl bg-slate-800 text-white font-bold flex items-center justify-center gap-2"
+                >
+                   <Eye size={14} /> Check
+                </button>
+                <button 
+                  onClick={() => setShowAd(true)}
+                  className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-bold flex items-center justify-center gap-2"
+                >
+                  <CheckCircle2 size={16} /> Confirm
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {infoModal && (
+           <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+             <motion.div 
+                initial={{ y: 50, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: 50, opacity: 0 }}
+                className="bg-slate-900 w-full max-w-md p-6 rounded-2xl border border-slate-700 max-h-[80vh] overflow-y-auto no-scrollbar"
+             >
+                <h3 className="text-xl font-bold text-white mb-4 sticky top-0 bg-slate-900 py-2">{infoModal.title}</h3>
+                <div className="text-slate-300 text-sm whitespace-pre-line leading-relaxed pb-4">
+                    {infoModal.content}
+                </div>
+                <button 
+                  onClick={() => setInfoModal(null)}
+                  className="w-full mt-2 bg-slate-800 py-3 rounded-xl text-white font-bold sticky bottom-0 shadow-xl border-t border-slate-700"
+                >
+                  Close
+                </button>
+             </motion.div>
+           </div>
+        )}
+      </AnimatePresence>
+    </Layout>
+  );
+};
+
+export default App;
