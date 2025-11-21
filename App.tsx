@@ -1,17 +1,18 @@
-
-
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { AdOverlay } from './components/AdOverlay';
 import { ScratchCard } from './components/ScratchCard';
 import { SpinWheel } from './components/SpinWheel';
 import { storage } from './services/storage';
-import { User, Tab, View, DailyStats } from './types';
+import { User, Tab, View, DailyStats, Transaction } from './types';
 import { APP_CONSTANTS, WITHDRAWAL_OPTIONS, WITHDRAWAL_TYPES, LEGAL_CONTENT, LOGO_URLS } from './constants';
+import { auth, googleProvider } from './firebaseConfig';
+import { signInWithPopup } from 'firebase/auth';
 import { 
   Coins, 
   LogOut, 
-  ChevronLeft, 
+  ChevronLeft,
+  ChevronRight,
   Copy, 
   Send, 
   CheckCircle2, 
@@ -20,10 +21,8 @@ import {
   Shield,
   FileText,
   HelpCircle,
-  ChevronRight,
   Mail,
   AlertTriangle,
-  Edit2,
   Eye
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -45,7 +44,7 @@ const App = () => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
-  const [showAccountChooser, setShowAccountChooser] = useState(false);
+  const [loginErrorCount, setLoginErrorCount] = useState(0);
   
   const [activeTab, setActiveTab] = useState<Tab>(Tab.HOME);
   const [activeView, setActiveView] = useState<View>(View.MAIN);
@@ -65,6 +64,7 @@ const App = () => {
   const [withdrawalStep, setWithdrawalStep] = useState<'NONE' | 'INSUFFICIENT' | 'INPUT' | 'CONFIRM'>('NONE');
   const [withdrawalInput, setWithdrawalInput] = useState('');
   const [infoModal, setInfoModal] = useState<{title: string, content: string} | null>(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
 
   useEffect(() => {
     // Check session status on load
@@ -87,61 +87,130 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
+  // --- MANUAL CONTROL SYNC LOGIC (Firebase Polling) ---
+  useEffect(() => {
+    if (!user) return;
+
+    const checkStatus = async () => {
+      const history = storage.getHistory();
+      const hasPending = history.some(tx => tx.type === 'WITHDRAW' && tx.status === 'PENDING');
+      
+      if (hasPending) {
+        const { updated, newHistory } = await storage.checkPendingWithdrawals(history);
+        
+        if (updated) {
+           localStorage.setItem('se_history_v1', JSON.stringify(newHistory));
+           
+           // Check for REJECTED transactions to refund coins
+           const rejectedTxs = newHistory.filter(tx => 
+             tx.status === 'FAILED' && 
+             !history.find(h => h.id === tx.id && h.status === 'FAILED')
+           );
+
+           if (rejectedTxs.length > 0) {
+             let totalRefund = 0;
+             rejectedTxs.forEach(tx => {
+               // Refund logic based on amount
+               let coinsToRefund = 900;
+               if (tx.amount === 15) coinsToRefund = tx.title.includes('UPI') ? 900 : 1500;
+               if (tx.amount === 50) coinsToRefund = tx.title.includes('UPI') ? 4500 : 7500;
+               if (tx.amount === 100) coinsToRefund = 9000;
+               totalRefund += coinsToRefund;
+             });
+
+             const bonusCoins = 50;
+             totalRefund += bonusCoins;
+
+             const bonusTx: Transaction = {
+                id: Date.now().toString(),
+                type: 'BONUS',
+                amount: bonusCoins,
+                status: 'SUCCESS',
+                title: 'Refund Bonus',
+                timestamp: Date.now(),
+                details: 'Compensation for failed withdrawal'
+             };
+             
+             const finalHistory = [bonusTx, ...newHistory];
+             localStorage.setItem('se_history_v1', JSON.stringify(finalHistory));
+
+             const currentUser = storage.getSavedUser();
+             if (currentUser) {
+                const newBalance = currentUser.coins + totalRefund;
+                const updatedUser = { ...currentUser, coins: newBalance };
+                storage.saveUser(updatedUser);
+                setUser(updatedUser);
+                showToast(`Withdrawal Rejected. Coins Refunded + 50 Bonus!`, 'info');
+             } else {
+                setHistoryVersion(prev => prev + 1);
+             }
+           } else {
+             setHistoryVersion(prev => prev + 1);
+             showToast("Withdrawal Status Updated!", 'success');
+           }
+        }
+      }
+    };
+
+    // Check every 10 seconds
+    const interval = setInterval(checkStatus, 10000);
+    return () => clearInterval(interval);
+  }, [user, historyVersion]);
+
   const showToast = (msg: string, type: 'success'|'error'|'info' = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
   };
 
-  const handleLoginClick = () => {
+  const handleLoginClick = async () => {
      setIsSigningIn(true);
-     const savedUser = storage.getSavedUser();
-     setTimeout(() => {
-       if (savedUser) {
-         storage.setSessionActive(true);
-         setUser(savedUser);
-         setIsSigningIn(false);
-         showToast("Welcome back!");
-       } else {
-         setIsSigningIn(false);
-         setShowAccountChooser(true);
+     
+     try {
+       // 1. Trigger Google Popup
+       const result = await signInWithPopup(auth, googleProvider);
+       const googleUser = result.user;
+
+       if (googleUser && googleUser.email) {
+          const deviceId = storage.getDeviceId() || "dev_" + Math.random().toString(36).substr(2, 9);
+          if (!storage.getDeviceId()) {
+            storage.setDeviceId(deviceId);
+          }
+
+          const appUser = await storage.syncUserWithFirebase(
+            googleUser.email, 
+            deviceId, 
+            APP_CONSTANTS.SIGNUP_BONUS
+          );
+
+          storage.setSessionActive(true);
+          setUser(appUser);
+          
+          if (appUser.isNewUser) {
+             storage.addTransaction({
+                id: Date.now().toString(),
+                type: 'BONUS',
+                amount: APP_CONSTANTS.SIGNUP_BONUS,
+                status: 'SUCCESS',
+                title: 'Signup Bonus',
+                timestamp: Date.now()
+              });
+             showToast("Congratulations 🎉 You got 50 coins.");
+          } else {
+             showToast("Welcome back!");
+          }
        }
-     }, 1000);
-  };
-
-  const handleAccountSelect = (email: string) => {
-    setShowAccountChooser(false);
-    setIsSigningIn(true);
-
-    setTimeout(() => {
-      const deviceId = storage.getDeviceId() || "dev_" + Math.random().toString(36).substr(2, 9);
-      
-      const newUser: User = {
-        email: email,
-        deviceId: deviceId,
-        coins: APP_CONSTANTS.SIGNUP_BONUS,
-        isNewUser: true,
-        signupDate: Date.now()
-      };
-
-      if (!storage.getDeviceId()) {
-        storage.setDeviceId(deviceId);
-      }
-
-      storage.saveUser(newUser);
-      storage.setSessionActive(true);
-      setUser(newUser);
-      setIsSigningIn(false);
-
-      storage.addTransaction({
-        id: Date.now().toString(),
-        type: 'BONUS',
-        amount: APP_CONSTANTS.SIGNUP_BONUS,
-        status: 'SUCCESS',
-        title: 'Signup Bonus',
-        timestamp: Date.now()
-      });
-      showToast("Congratulations 🎉 You got 50 coins.");
-    }, 1500);
+     } catch (error: any) {
+       console.error("Login Failed:", error);
+       setLoginErrorCount(prev => prev + 1);
+       
+       // Only alert if it's a real error (not popup closed by user)
+       if (error.code !== 'auth/popup-closed-by-user') {
+          // alert(`Login Failed: ${error.message}`);
+          console.log("Popup blocked or closed");
+       }
+     } finally {
+       setIsSigningIn(false);
+     }
   };
 
   const handleLogout = () => {
@@ -158,10 +227,9 @@ const App = () => {
   const onAdClose = () => {
     setShowAd(false);
     
-    // Handle Reward
     if (pendingReward && user) {
       
-      // Set specific cooldown based on the active view
+      // Normal Tasks
       if (activeView === View.SCRATCH) {
         setScratchCooldown(APP_CONSTANTS.COOLDOWN_MS);
       } else if (activeView === View.SPIN) {
@@ -185,6 +253,7 @@ const App = () => {
       
       storage.saveStats(updatedStats);
       storage.saveUser(updatedUser);
+      
       storage.addTransaction({
         id: Date.now().toString(),
         type: 'EARN',
@@ -201,19 +270,15 @@ const App = () => {
       return;
     }
 
-    // Handle Withdrawal Finalization (after ad)
     if (withdrawalStep === 'CONFIRM' && selectedOption && user) {
       executeWithdrawal();
     }
   };
-
-  // --- Withdrawal Logic ---
   
   const handleOptionClick = (option: typeof WITHDRAWAL_OPTIONS[0]) => {
     if (!user) return;
     setSelectedOption(option);
     setWithdrawalInput('');
-    // Requirement: Input payment address FIRST, regardless of balance.
     setWithdrawalStep('INPUT');
   };
 
@@ -222,24 +287,21 @@ const App = () => {
       showToast('Please enter a valid Payment Address', 'error');
       return;
     }
-
-    // Requirement: Check Balance Check AFTER Input is done
     if (user && selectedOption && user.coins < selectedOption.coins) {
       setWithdrawalStep('INSUFFICIENT');
       return;
     }
-
     setWithdrawalStep('CONFIRM');
   };
 
-  const executeWithdrawal = () => {
+  const executeWithdrawal = async () => {
       if(!user || !selectedOption) return;
       
       const updatedUser = { ...user, coins: user.coins - selectedOption.coins };
-      storage.saveUser(updatedUser);
+      await storage.saveUser(updatedUser);
       setUser(updatedUser);
       
-      storage.addTransaction({
+      const tx: Transaction = {
           id: Date.now().toString(),
           type: 'WITHDRAW',
           amount: selectedOption.amount,
@@ -247,7 +309,10 @@ const App = () => {
           title: `Withdraw to ${selectedOption.type === WITHDRAWAL_TYPES.UPI ? 'UPI' : 'Google Play'}`,
           details: withdrawalInput,
           timestamp: Date.now(),
-      });
+      };
+
+      storage.addTransaction(tx);
+      await storage.createWithdrawalRequest(updatedUser, tx);
 
       setWithdrawalStep('NONE');
       setSelectedOption(null);
@@ -257,10 +322,8 @@ const App = () => {
       showToast("Withdrawal Request Submitted!", 'success');
   };
 
-  // -- Render Logic --
-  
-  // Helper to get current active cooldown for display
   const currentActiveCooldown = activeView === View.SCRATCH ? scratchCooldown : spinCooldown;
+  const referralLink = user ? `${window.location.origin}/?ref=${user.email.split('@')[0]}` : '';
 
   if (isLoading) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-yellow-500"><Coins className="animate-bounce w-12 h-12"/></div>;
 
@@ -284,7 +347,7 @@ const App = () => {
             className="w-full bg-white hover:bg-gray-100 text-slate-900 font-bold py-4 rounded-xl flex items-center justify-center gap-3 transition-all active:scale-95"
           >
             {isSigningIn ? (
-               <span className="flex items-center gap-2"><span className="animate-spin">⏳</span> Please Wait...</span>
+               <span className="flex items-center gap-2"><span className="animate-spin">⏳</span> Connecting Securely...</span>
             ) : (
               <>
                 <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-6 h-6" alt="G" />
@@ -292,61 +355,27 @@ const App = () => {
               </>
             )}
           </button>
+
+          {/* Fallback Login for Preview (Visible only if multiple errors occur) */}
+          {loginErrorCount > 2 && (
+             <div className="mt-4 text-center">
+               <p className="text-red-400 text-xs mb-2">Login issues? Check Firebase settings.</p>
+             </div>
+          )}
           
           <p className="text-xs text-slate-600 mt-8">By continuing, you agree to our Terms & Privacy Policy</p>
         </div>
-
-        {/* Fake Account Chooser Modal */}
-        <AnimatePresence>
-          {showAccountChooser && (
-            <div className="fixed inset-0 bg-black/80 z-50 flex items-end sm:items-center justify-center">
-              <motion.div 
-                initial={{ y: "100%" }}
-                animate={{ y: 0 }}
-                exit={{ y: "100%" }}
-                className="bg-white w-full max-w-[420px] rounded-t-2xl sm:rounded-2xl overflow-hidden"
-              >
-                <div className="p-4 border-b flex items-center gap-3">
-                  <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-6 h-6" />
-                  <span className="font-medium text-slate-700">Choose an account</span>
-                </div>
-                <div className="p-2">
-                  <button onClick={() => handleAccountSelect('nikhil.earn@gmail.com')} className="w-full p-4 flex items-center gap-4 hover:bg-gray-50 text-left border-b border-gray-100">
-                    <div className="w-10 h-10 bg-purple-600 rounded-full text-white flex items-center justify-center font-bold">N</div>
-                    <div>
-                      <p className="font-medium text-slate-800">Nikhil Earner</p>
-                      <p className="text-sm text-slate-500">nikhil.earn@gmail.com</p>
-                    </div>
-                  </button>
-                  <button onClick={() => handleAccountSelect('demo.user@gmail.com')} className="w-full p-4 flex items-center gap-4 hover:bg-gray-50 text-left">
-                    <div className="w-10 h-10 bg-orange-600 rounded-full text-white flex items-center justify-center font-bold">D</div>
-                    <div>
-                      <p className="font-medium text-slate-800">Demo User</p>
-                      <p className="text-sm text-slate-500">demo.user@gmail.com</p>
-                    </div>
-                  </button>
-                  <div className="p-4 text-center border-t mt-2">
-                    <button onClick={() => setShowAccountChooser(false)} className="text-sm text-slate-500 font-medium">Cancel</button>
-                  </div>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
       </div>
     );
   }
 
   return (
     <Layout activeTab={activeTab} onTabChange={setActiveTab} isAuth={!!user}>
-      {/* Ad Overlay triggers either reward OR withdrawal execution on close */}
       <AdOverlay isOpen={showAd} onClose={onAdClose} />
-      
       <AnimatePresence>
         {toast && <Toast message={toast.msg} type={toast.type} />}
       </AnimatePresence>
 
-      {/* --- HOME TAB --- */}
       {activeTab === Tab.HOME && activeView === View.MAIN && (
         <div className="p-5 space-y-6">
           <div className="flex justify-between items-center">
@@ -402,11 +431,11 @@ const App = () => {
             </div>
             <div className="mt-4 flex gap-2">
               <div className="bg-slate-900 flex-1 rounded px-3 py-2 text-xs text-slate-400 truncate font-mono select-all">
-                {APP_CONSTANTS.REFERRAL_BASE_LINK}{user.email.split('@')[0]}
+                {referralLink}
               </div>
               <button 
                 onClick={() => {
-                    navigator.clipboard.writeText(`${APP_CONSTANTS.REFERRAL_BASE_LINK}${user.email.split('@')[0]}`);
+                    navigator.clipboard.writeText(referralLink);
                     showToast("Referral Link Copied!");
                 }}
                 className="bg-yellow-500 text-slate-900 px-3 py-2 rounded font-bold text-xs hover:bg-yellow-400"
@@ -416,7 +445,6 @@ const App = () => {
             </div>
           </div>
 
-          {/* Support Link */}
           <div className="flex justify-center mt-4">
              <a href={APP_CONSTANTS.TELEGRAM_LINK} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-slate-400 hover:text-blue-400 transition-colors text-sm">
                 <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-white">
@@ -428,7 +456,6 @@ const App = () => {
         </div>
       )}
 
-      {/* --- GAMES SUB-VIEWS --- */}
       {activeTab === Tab.HOME && (activeView === View.SCRATCH || activeView === View.SPIN) && (
         <div className="h-full flex flex-col">
           <div className="p-4 flex items-center gap-4">
@@ -469,328 +496,6 @@ const App = () => {
         </div>
       )}
 
-      {/* --- WALLET TAB --- */}
       {activeTab === Tab.WALLET && (
         <div className="p-5 pb-24">
-           <h2 className="text-2xl font-bold text-white mb-6">Wallet</h2>
-           
-           <div className="bg-gradient-to-r from-slate-800 to-slate-900 p-6 rounded-2xl border border-slate-700 text-center mb-8 relative overflow-hidden">
-             <div className="absolute top-0 right-0 p-4 opacity-10">
-                <Coins size={100} className="text-white"/>
-             </div>
-             <span className="text-slate-400 text-sm relative z-10">Current Balance</span>
-             <div className="text-4xl font-black text-yellow-400 mt-2 flex justify-center items-center gap-2 relative z-10">
-               <Coins className="w-8 h-8" /> {user.coins}
-             </div>
-             <span className="text-slate-500 text-xs block mt-2 relative z-10">Redeem your coins for Cash</span>
-           </div>
-
-           <h3 className="text-white font-bold mb-4">Withdraw Methods</h3>
-           <div className="space-y-4">
-             {/* UPI Section */}
-             <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="bg-white p-1 rounded">
-                    <img src={LOGO_URLS.UPI} alt="UPI Logo" className="w-8 h-5 object-contain" />
-                  </div>
-                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">BHIM UPI</h4>
-                </div>
-                <div className="grid gap-3">
-                    {WITHDRAWAL_OPTIONS.filter(o => o.type === WITHDRAWAL_TYPES.UPI).map((opt) => (
-                        <button 
-                            key={opt.id}
-                            onClick={() => handleOptionClick(opt)}
-                            className="bg-slate-800 hover:bg-slate-750 p-3 rounded-xl border border-slate-700 flex justify-between items-center group transition-all active:scale-95"
-                        >
-                            <div className="flex items-center gap-3">
-                                <div className="w-12 h-12 bg-white rounded-xl p-1.5 flex items-center justify-center overflow-hidden shrink-0">
-                                    <img src={opt.icon} alt="UPI" className="w-full h-full object-contain" />
-                                </div>
-                                <div className="text-left">
-                                    <p className="text-white font-bold text-sm">{opt.label}</p>
-                                    <p className="text-yellow-500 text-xs font-mono">{opt.coins} Coins</p>
-                                </div>
-                            </div>
-                            <div className="bg-slate-700 px-3 py-1 rounded text-xs text-white font-medium">Redeem</div>
-                        </button>
-                    ))}
-                </div>
-             </div>
-
-             {/* Gift Card Section */}
-             <div className="mt-6">
-                <div className="flex items-center gap-2 mb-3">
-                   <div className="bg-white p-1 rounded">
-                     <img src={LOGO_URLS.PLAY} alt="Play Logo" className="w-6 h-6 object-contain" />
-                   </div>
-                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Google Play</h4>
-                </div>
-                <div className="grid gap-3">
-                    {WITHDRAWAL_OPTIONS.filter(o => o.type === WITHDRAWAL_TYPES.GIFT_CARD).map((opt) => (
-                        <button 
-                            key={opt.id}
-                            onClick={() => handleOptionClick(opt)}
-                            className="bg-slate-800 hover:bg-slate-750 p-3 rounded-xl border border-slate-700 flex justify-between items-center group transition-all active:scale-95"
-                        >
-                             <div className="flex items-center gap-3">
-                                <div className="w-12 h-12 bg-white rounded-xl p-2 flex items-center justify-center overflow-hidden shrink-0">
-                                    <img src={opt.icon} alt="Play Store" className="w-full h-full object-contain" />
-                                </div>
-                                <div className="text-left">
-                                    <p className="text-white font-bold text-sm">{opt.label}</p>
-                                    <p className="text-yellow-500 text-xs font-mono">{opt.coins} Coins</p>
-                                </div>
-                            </div>
-                            <div className="bg-slate-700 px-3 py-1 rounded text-xs text-white font-medium">Redeem</div>
-                        </button>
-                    ))}
-                </div>
-             </div>
-           </div>
-        </div>
-      )}
-
-      {/* --- HISTORY TAB --- */}
-      {activeTab === Tab.HISTORY && (
-        <div className="p-5 pb-24">
-           <h2 className="text-2xl font-bold text-white mb-6">Transactions</h2>
-           <div className="space-y-3">
-             {storage.getHistory().map((tx) => (
-               <div key={tx.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
-                  <div className="flex items-center gap-3">
-                    <div className={`p-2 rounded-full ${tx.type === 'WITHDRAW' ? 'bg-red-500/20 text-red-500' : 'bg-green-500/20 text-green-500'}`}>
-                      {tx.type === 'WITHDRAW' ? <Coins className="w-4 h-4 rotate-180" /> : <Coins className="w-4 h-4" />}
-                    </div>
-                    <div>
-                      <p className="text-white font-medium text-sm">{tx.title}</p>
-                      <p className="text-slate-500 text-[10px]">
-                        {new Date(tx.timestamp).toLocaleString()}
-                      </p>
-                      {tx.details && <p className="text-xs text-slate-400 mt-0.5">{tx.details}</p>}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <span className={`font-bold block ${tx.type === 'WITHDRAW' ? 'text-red-400' : 'text-green-400'}`}>
-                        {tx.type === 'WITHDRAW' ? '-' : '+'}{tx.amount}
-                    </span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${tx.status === 'SUCCESS' ? 'bg-green-500/10 text-green-500' : 'bg-yellow-500/10 text-yellow-500'}`}>
-                        {tx.status}
-                    </span>
-                  </div>
-               </div>
-             ))}
-             {storage.getHistory().length === 0 && (
-               <div className="text-center text-slate-500 mt-10">No transactions yet.</div>
-             )}
-           </div>
-        </div>
-      )}
-
-      {/* --- PROFILE TAB --- */}
-      {activeTab === Tab.PROFILE && (
-        <div className="p-5 pb-24">
-           <div className="text-center mb-8 mt-4">
-             <div className="w-20 h-20 bg-slate-800 border-2 border-slate-700 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl shadow-xl">
-               <span className="text-2xl font-bold text-slate-400">{user.email.charAt(0).toUpperCase()}</span>
-             </div>
-             <h2 className="text-white font-bold truncate px-4">{user.email}</h2>
-             <p className="text-slate-500 text-xs font-mono mt-1">ID: {user.deviceId}</p>
-           </div>
-
-           <div className="space-y-3">
-              <div className="bg-slate-800 p-4 rounded-xl flex justify-between border border-slate-700 mb-6">
-                <span className="text-slate-300 text-sm">Coins Earned Today</span>
-                <span className="text-yellow-400 font-bold">{stats.coinsEarnedToday}</span>
-              </div>
-              
-              <h4 className="text-slate-500 text-xs font-bold uppercase tracking-wider ml-1">Info & Support</h4>
-              
-              <button onClick={() => setInfoModal({title: 'Terms & Conditions', content: LEGAL_CONTENT.TERMS})} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
-                 <div className="flex items-center gap-3"><FileText size={18} className="text-slate-400"/> Terms & Conditions</div>
-                 <ChevronRight size={16} className="text-slate-500" />
-              </button>
-
-              <button onClick={() => setInfoModal({title: 'Privacy Policy', content: LEGAL_CONTENT.PRIVACY})} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
-                 <div className="flex items-center gap-3"><Shield size={18} className="text-slate-400"/> Privacy Policy</div>
-                 <ChevronRight size={16} className="text-slate-500" />
-              </button>
-
-              <button onClick={() => setInfoModal({title: 'FAQs', content: LEGAL_CONTENT.FAQ})} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
-                 <div className="flex items-center gap-3"><HelpCircle size={18} className="text-slate-400"/> FAQs</div>
-                 <ChevronRight size={16} className="text-slate-500" />
-              </button>
-
-              <a href={APP_CONSTANTS.TELEGRAM_LINK} target="_blank" rel="noreferrer" className="w-full bg-[#229ED9]/10 border border-[#229ED9]/30 p-4 rounded-xl flex items-center justify-between text-[#229ED9] text-sm hover:bg-[#229ED9]/20 mt-4">
-                 <div className="flex items-center gap-3"><Send size={18} /> Contact Support (Telegram)</div>
-                 <ChevronRight size={16} />
-              </a>
-
-              <a href={`mailto:${APP_CONSTANTS.EMAIL_SUPPORT}`} className="w-full bg-slate-800 p-4 rounded-xl flex items-center justify-between text-slate-200 text-sm hover:bg-slate-750">
-                 <div className="flex items-center gap-3"><Mail size={18} className="text-slate-400"/> Email Support</div>
-                 <ChevronRight size={16} className="text-slate-500" />
-              </a>
-
-              <button onClick={handleLogout} className="w-full text-red-500 p-4 rounded-xl flex items-center justify-center gap-2 mt-4 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 transition-all">
-                <LogOut size={18} /> Logout
-              </button>
-           </div>
-        </div>
-      )}
-
-      {/* --- MODALS --- */}
-      <AnimatePresence>
-        {/* 1. Insufficient Funds Modal */}
-        {withdrawalStep === 'INSUFFICIENT' && (
-          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-slate-900 w-full max-w-xs p-6 rounded-2xl border border-red-500/30 text-center"
-            >
-              <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                <AlertTriangle className="w-8 h-8 text-red-500" />
-              </div>
-              <h3 className="text-xl font-bold text-white mb-2">Not Enough Coins</h3>
-              <p className="text-slate-400 text-sm mb-6">
-                You need <span className="text-yellow-400 font-bold">{selectedOption?.coins} coins</span> to redeem this reward.
-              </p>
-              
-              <div className="space-y-3">
-                <button 
-                  onClick={() => {
-                    setWithdrawalStep('NONE');
-                    setSelectedOption(null);
-                    setActiveTab(Tab.HOME);
-                  }}
-                  className="w-full py-3 rounded-xl bg-gradient-to-r from-yellow-500 to-orange-500 text-black font-bold shadow-lg animate-pulse"
-                >
-                  Earn More Coins
-                </button>
-                <button 
-                  onClick={() => {
-                    setWithdrawalStep('NONE');
-                    setSelectedOption(null);
-                  }}
-                  className="w-full py-3 rounded-xl bg-slate-800 text-slate-400 font-bold"
-                >
-                  Close
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-
-        {/* 2. Input Modal - FIRST STEP NOW */}
-        {withdrawalStep === 'INPUT' && selectedOption && (
-          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-            <motion.div 
-               initial={{ scale: 0.9, opacity: 0 }}
-               animate={{ scale: 1, opacity: 1 }}
-               exit={{ scale: 0.9, opacity: 0 }}
-               className="bg-slate-900 w-full max-w-xs p-6 rounded-2xl border border-slate-700"
-            >
-              <h3 className="text-xl font-bold text-white mb-2">Redeem {selectedOption.label}</h3>
-              <p className="text-slate-400 text-xs mb-4">Enter your details correctly. We are not responsible for wrong inputs.</p>
-              
-              <div className="mb-6">
-                <label className="text-slate-400 text-xs block mb-1 font-bold uppercase tracking-wider">
-                   Payment Address
-                </label>
-                <input 
-                  type="text" 
-                  value={withdrawalInput}
-                  placeholder="Enter Payment Address (UPI/Email)"
-                  className="w-full bg-slate-800 text-white p-3 rounded-lg border border-slate-700 focus:border-yellow-500 outline-none"
-                  onChange={(e) => setWithdrawalInput(e.target.value)}
-                />
-              </div>
-
-              <div className="flex gap-3">
-                <button 
-                  onClick={() => { setWithdrawalStep('NONE'); setSelectedOption(null); }}
-                  className="flex-1 py-3 rounded-xl bg-slate-800 text-white font-bold"
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={handleInputNext}
-                  className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-bold"
-                >
-                  Next
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-
-        {/* 3. Confirmation Modal */}
-        {withdrawalStep === 'CONFIRM' && selectedOption && (
-           <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-            <motion.div 
-               initial={{ scale: 0.9, opacity: 0 }}
-               animate={{ scale: 1, opacity: 1 }}
-               exit={{ scale: 0.9, opacity: 0 }}
-               className="bg-slate-900 w-full max-w-xs p-6 rounded-2xl border border-yellow-500/50 text-center"
-            >
-              <h3 className="text-lg font-bold text-white mb-4">Confirm Details</h3>
-              
-              <div className="bg-slate-800 p-3 rounded-lg mb-4 text-left">
-                <p className="text-slate-500 text-xs">Withdraw Method</p>
-                <p className="text-white font-medium">{selectedOption.label}</p>
-                <div className="h-px bg-slate-700 my-2"/>
-                <p className="text-slate-500 text-xs">Payment Address</p>
-                <p className="text-yellow-400 font-mono font-bold break-all">{withdrawalInput}</p>
-              </div>
-
-              <p className="text-slate-400 text-xs mb-6">
-                Is this information correct? Coins will be deducted immediately.
-              </p>
-
-              <div className="flex gap-3">
-                <button 
-                  onClick={() => setWithdrawalStep('INPUT')}
-                  className="flex-1 py-3 rounded-xl bg-slate-800 text-white font-bold flex items-center justify-center gap-2"
-                >
-                   <Eye size={14} /> Check
-                </button>
-                <button 
-                  onClick={() => setShowAd(true)}
-                  className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-bold flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 size={16} /> Confirm
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-
-        {/* Info Modal (Terms, Privacy, FAQ) */}
-        {infoModal && (
-           <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-             <motion.div 
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: 50, opacity: 0 }}
-                className="bg-slate-900 w-full max-w-md p-6 rounded-2xl border border-slate-700 max-h-[80vh] overflow-y-auto no-scrollbar"
-             >
-                <h3 className="text-xl font-bold text-white mb-4 sticky top-0 bg-slate-900 py-2">{infoModal.title}</h3>
-                <div className="text-slate-300 text-sm whitespace-pre-line leading-relaxed pb-4">
-                    {infoModal.content}
-                </div>
-                <button 
-                  onClick={() => setInfoModal(null)}
-                  className="w-full mt-2 bg-slate-800 py-3 rounded-xl text-white font-bold sticky bottom-0 shadow-xl border-t border-slate-700"
-                >
-                  Close
-                </button>
-             </motion.div>
-           </div>
-        )}
-      </AnimatePresence>
-
-    </Layout>
-  );
-};
-
-export default App;
+           <h2 className="text-2xl
