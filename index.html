@@ -1,32 +1,49 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Scratch Earn Pro</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-    <style>
-      body {
-        font-family: 'Inter', sans-serif;
-        background-color: #0f172a; /* slate-900 */
-        margin: 0;
-        padding: 0;
-        overflow-x: hidden;
-      }
-      /* Hide scrollbar for Chrome, Safari and Opera */
-      .no-scrollbar::-webkit-scrollbar {
-          display: none;
-      }
-      /* Hide scrollbar for IE, Edge and Firefox */
-      .no-scrollbar {
-          -ms-overflow-style: none;  /* IE and Edge */
-          scrollbar-width: none;  /* Firefox */
-      }
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
-  </body>
-</html>
+// --- 3. 🌐 REAL GOOGLE LOGIN (Redirect Method) ---
+const handleGoogleLogin = async () => {
+    setLoading(true);
+    const provider = new firebase.auth.GoogleAuthProvider();
+    const referrerId = getUrlReferrerId(); 
+
+    try {
+        // Pop-up ki jagah Redirect use kiya ja raha hai (Mobile-friendly)
+        await auth.signInWithRedirect(provider);
+        
+        // NOTE: Redirect ke baad yeh code waapas yahan aayega
+        
+    } catch (error) {
+        // Error handling for redirect
+        console.error("Login failed:", error.message);
+        setToast(error.code === 'auth/cancelled-popup-request' ? "Login cancelled." : "Login failed. Try again.");
+        setLoading(false);
+    }
+};
+
+// Redirect ke baad, app ko result check karna hoga
+useEffect(() => {
+    auth.getRedirectResult().then(async (result) => {
+        if (result.user) {
+            const user = result.user;
+            const isNewUser = result.additionalUserInfo.isNewUser;
+            
+            // Call the secure Cloud Function for user initialization and referrer bonus
+            const initializeUser = functions.httpsCallable('initializeUser');
+
+            const response = await initializeUser({
+                uid: user.uid,
+                email: user.email,
+                name: user.displayName,
+                isNewUser: isNewUser,
+                referrerId: isNewUser ? getUrlReferrerId() : null 
+            });
+
+            setUser(response.data.user);
+            if (isNewUser) showToast("Signup successful! 50 Coins Bonus Added.");
+        }
+    }).catch((error) => {
+        console.error("Redirect Error:", error);
+    }).finally(() => {
+        setLoading(false);
+    });
+}, []);
+
+// Baaki sab components waise hi rahenge.
