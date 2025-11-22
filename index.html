@@ -1,49 +1,315 @@
-// --- 3. 🌐 REAL GOOGLE LOGIN (Redirect Method) ---
-const handleGoogleLogin = async () => {
-    setLoading(true);
-    const provider = new firebase.auth.GoogleAuthProvider();
-    const referrerId = getUrlReferrerId(); 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scratch Earn - Firebase Live</title>
+    
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/framer-motion@10.16.4/dist/framer-motion.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-firestore.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-functions.js"></script>
 
-    try {
-        // Pop-up ki jagah Redirect use kiya ja raha hai (Mobile-friendly)
-        await auth.signInWithRedirect(provider);
-        
-        // NOTE: Redirect ke baad yeh code waapas yahan aayega
-        
-    } catch (error) {
-        // Error handling for redirect
-        console.error("Login failed:", error.message);
-        setToast(error.code === 'auth/cancelled-popup-request' ? "Login cancelled." : "Login failed. Try again.");
-        setLoading(false);
-    }
-};
+    <style>
+        body { background-color: #121212; color: white; font-family: 'Inter', sans-serif; display: flex; justify-content: center; min-height: 100vh; margin: 0; }
+        .mobile-container { width: 100%; max-width: 420px; background-color: #18181b; min-height: 100vh; position: relative; overflow-x: hidden; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        @keyframes spin-wheel { 0% { transform: rotate(0deg); } 100% { transform: rotate(1800deg); } }
+        .spinning { animation: spin-wheel 3s cubic-bezier(0.25, 0.1, 0.25, 1) forwards; }
+        .scratch-overlay { transition: opacity 0.5s; }
+        .scratched { opacity: 0; pointer-events: none; }
+    </style>
+    <script>
+        tailwind.config = { theme: { extend: { colors: { gold: '#FFD700', goldDark: '#DAA520', darkBg: '#18181b', cardBg: '#27272a', } } } }
+    </script>
+</head>
+<body>
 
-// Redirect ke baad, app ko result check karna hoga
-useEffect(() => {
-    auth.getRedirectResult().then(async (result) => {
-        if (result.user) {
-            const user = result.user;
-            const isNewUser = result.additionalUserInfo.isNewUser;
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const { motion, AnimatePresence } = window.Motion;
+
+        const Icon = ({ name, size = 24, color = "currentColor", weight="regular" }) => {
+            return <i className={`ph-${name} ph-${weight}`} style={{ fontSize: size, color: color }}></i>;
+        };
+
+        // --- 1. 🔥 FIREBASE CONFIGURATION (KEYS ADDED) 🔥 ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyC2sVaRwL61ZKSM1dmLttbTrDXm-cQsgcI", 
+            authDomain: "scratch-earn-fc3ed.firebaseapp.com",
+            projectId: "scratch-earn-fc3ed",
+            storageBucket: "scratch-earn-fc3ed.firebasestorage.app",
+            messagingSenderId: "370359166230",
+            appId: "1:370359166230:web:42dbf1c0a79b4417e75c37"
+        };
+
+        // Initialize Firebase
+        const app = firebase.initializeApp(firebaseConfig);
+        const auth = app.auth();
+        const db = app.firestore();
+        const functions = app.functions();
+        
+        // Function to read URL parameter for referral tracking
+        const getUrlReferrerId = () => {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('referrerId'); 
+        };
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [activeTab, setActiveTab] = useState('home');
+            const [adState, setAdState] = useState({ active: false, closable: false, rewardPending: null });
+            const [timer, setTimer] = useState({ active: false, seconds: 0, task: null });
+            const [toast, setToast] = useState(null);
+
+            const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3000); };
+
+            // --- 2. 🔑 AUTH STATE LISTENER & REDIRECT RESULT CHECK ---
+            useEffect(() => {
+                let isMounted = true;
+                setLoading(true);
+                
+                // 1. Check for Redirect Result (After Login Attempt)
+                auth.getRedirectResult().then(async (result) => {
+                    if (result.user && isMounted) {
+                        const user = result.user;
+                        const isNewUser = result.additionalUserInfo.isNewUser;
+                        
+                        // Call the secure Cloud Function for user initialization and referrer bonus
+                        const initializeUser = functions.httpsCallable('initializeUser');
+
+                        const response = await initializeUser({
+                            uid: user.uid,
+                            email: user.email,
+                            name: user.displayName,
+                            isNewUser: isNewUser,
+                            referrerId: isNewUser ? getUrlReferrerId() : null 
+                        });
+
+                        setUser(response.data.user);
+                        if (isNewUser) showToast("Signup successful! 50 Coins Bonus Added.");
+                    }
+                }).catch((error) => {
+                    console.error("Redirect Error:", error);
+                    setToast("Login failed due to error: " + error.code);
+                });
+
+                // 2. Check general auth state (for returning users)
+                const unsubscribe = auth.onAuthStateChanged(async firebaseUser => {
+                    if (firebaseUser && isMounted) {
+                        // User logged in, now fetch their balance/data from Firestore
+                        try {
+                            const userDoc = await db.collection('users').doc(firebaseUser.uid).get();
+                            if (userDoc.exists) {
+                                setUser(userDoc.data());
+                            } else if (!user) {
+                                // Data not fetched from redirect/new signup, use temp data
+                                setUser({ uid: firebaseUser.uid, email: firebaseUser.email, name: firebaseUser.displayName || 'Demo User', balance: 0, history: [] });
+                            }
+                        } catch(e) {
+                            console.error("Error fetching user data:", e);
+                            setToast("Error fetching data. Please try again.");
+                        }
+                    } else if (!firebaseUser && isMounted) {
+                        setUser(null);
+                    }
+                    if (isMounted) setLoading(false);
+                });
+
+                return () => { unsubscribe(); isMounted = false; };
+            }, []);
+
+            // --- 3. 🌐 REAL GOOGLE LOGIN (Redirect Method) ---
+            const handleGoogleLogin = async () => {
+                setLoading(true);
+                const provider = new firebase.auth.GoogleAuthProvider();
+                
+                try {
+                    // Redirect method used to avoid mobile pop-up blockers
+                    await auth.signInWithRedirect(provider);
+                    
+                } catch (error) {
+                    // Error handling for redirect setup
+                    console.error("Login failed:", error.message);
+                    setToast("Login setup failed. Try again.");
+                    setLoading(false);
+                }
+            };
             
-            // Call the secure Cloud Function for user initialization and referrer bonus
-            const initializeUser = functions.httpsCallable('initializeUser');
+            // --- 4. ⚡ TASK LOGIC (Will call secure Cloud Function) ---
+            const startTask = (type) => {
+                if (timer.active) return showToast("Please wait for timer to end.");
+                setAdState({ active: true, closable: false, rewardPending: type });
+                setTimeout(() => { setAdState(prev => ({ ...prev, closable: true })); }, 3000);
+            };
 
-            const response = await initializeUser({
-                uid: user.uid,
-                email: user.email,
-                name: user.displayName,
-                isNewUser: isNewUser,
-                referrerId: isNewUser ? getUrlReferrerId() : null 
-            });
+            const closeAd = () => {
+                const type = adState.rewardPending;
+                setAdState({ active: false, closable: false, rewardPending: null });
+                setTimer({ active: true, seconds: 10, task: type });
+                let interval = setInterval(() => {
+                    setTimer(prev => {
+                        if (prev.seconds <= 1) {
+                            clearInterval(interval);
+                            completeTask(type);
+                            return { active: false, seconds: 0, task: null };
+                        }
+                        return { ...prev, seconds: prev.seconds - 1 };
+                    });
+                }, 1000);
+            };
 
-            setUser(response.data.user);
-            if (isNewUser) showToast("Signup successful! 50 Coins Bonus Added.");
+            const completeTask = async (type) => {
+                try {
+                    const performTask = functions.httpsCallable('performTask');
+                    const response = await performTask({ taskType: type });
+
+                    if (response.data.success) {
+                        setUser(response.data.updatedUser); 
+                        showToast(`+${response.data.reward} Coins Added!`);
+                    } else {
+                        showToast(response.data.message || "Limit Reached or Task Failed!");
+                    }
+                } catch (error) {
+                    console.error("Task failed:", error);
+                    showToast("Task failed. Server error.");
+                }
+            };
+
+            // --- 5. WITHDRAW LOGIC (Simplified) ---
+            const handleWithdraw = (amount, method) => {
+                 if (user.balance < amount) {
+                    showToast("Insufficient Coins! Earn more.");
+                    setTimeout(() => setActiveTab('home'), 1000);
+                    return;
+                 }
+                 if(confirm(`Confirm withdrawal of ${amount} coins to ${method}?`)) {
+                    setAdState({ active: true, closable: false, rewardPending: 'withdraw_process', amount, method });
+                     setTimeout(() => { setAdState(prev => ({ ...prev, closable: true })); }, 3000);
+                 }
+            };
+            
+            const closeWithdrawAd = (amount, method) => {
+                 const newHistoryItem = { id: Math.random(), date: new Date().toLocaleDateString(), amount: amount, status: 'Pending', detail: method };
+                 const updatedHistory = [newHistoryItem, ...(user.history || [])];
+
+                 setUser(prev => ({ ...prev, balance: prev.balance - amount, history: updatedHistory }));
+                 setAdState({ active: false, closable: false, rewardPending: null });
+                 showToast("Request Submitted to Admin.");
+                 
+                 setTimeout(() => {
+                     showToast("Payment Successful!");
+                     setUser(prev => {
+                        const finalHistory = [...(prev.history || [])];
+                        if(finalHistory.length > 0) {
+                            finalHistory[0].status = 'Success';
+                        }
+                        return { ...prev, history: finalHistory };
+                     });
+                 }, 8000);
+            }
+            
+            // --- UI RENDER LOGIC ---
+            if (loading) return (<div className="mobile-container flex items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-gold"></div></div>);
+            if (!user) return <AuthScreen onLogin={handleGoogleLogin} />;
+
+            return (
+                <div className="mobile-container text-sm pb-20">
+                    <div className="flex justify-between items-center p-4 bg-cardBg border-b border-gray-800">
+                        <div className="font-bold text-lg flex items-center gap-2 text-gold">Scratch Earn</div>
+                        <div className="flex items-center gap-1 bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
+                            <Icon name="coin" color="#FFD700" weight="fill" /><span className="font-bold text-white">{user.balance || 0}</span>
+                        </div>
+                    </div>
+                    <main className="p-4 min-h-[80vh]">
+                        {activeTab === 'home' && (<HomeScreen user={user} onTask={startTask} timer={timer} />)}
+                        {activeTab === 'wallet' && (<WalletScreen user={user} onWithdraw={handleWithdraw} />)}
+                        {activeTab === 'history' && (<HistoryScreen history={user.history || []} />)}
+                        {activeTab === 'profile' && (<ProfileScreen user={user} />)}
+                    </main>
+                    <div className="fixed bottom-0 w-full max-w-[420px] bg-cardBg border-t border-gray-800 flex justify-around py-3 z-40">
+                        <NavBtn icon="house" label="Home" active={activeTab==='home'} onClick={()=>setActiveTab('home')} />
+                        <NavBtn icon="wallet" label="Wallet" active={activeTab==='wallet'} onClick={()=>setActiveTab('wallet')} />
+                        <NavBtn icon="clock-counter-clockwise" label="History" active={activeTab==='history'} onClick={()=>setActiveTab('history')} />
+                        <NavBtn icon="user" label="Profile" active={activeTab==='profile'} onClick={()=>setActiveTab('profile')} />
+                    </div>
+                    <AnimatePresence>
+                        {adState.active && (<AdOverlay closable={adState.closable} onClose={() => { if(adState.rewardPending === 'withdraw_process') { closeWithdrawAd(adState.amount, adState.method); } else { closeAd(); } }} />)}
+                        {toast && (<motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg z-50 border border-gold w-max">{toast}</motion.div>)}
+                    </AnimatePresence>
+                </div>
+            );
         }
-    }).catch((error) => {
-        console.error("Redirect Error:", error);
-    }).finally(() => {
-        setLoading(false);
-    });
-}, []);
+        // --- SUB COMPONENTS (UNCHANGED) ---
+        const AuthScreen = ({ onLogin }) => (
+            <div className="mobile-container flex flex-col items-center justify-center p-6 space-y-8 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]">
+                <div className="text-center space-y-2">
+                    <div className="w-24 h-24 bg-gradient-to-tr from-yellow-400 to-orange-600 rounded-2xl mx-auto flex items-center justify-center shadow-xl shadow-orange-500/20"><Icon name="trophy" size={48} color="white" weight="fill" /></div>
+                    <h1 className="text-3xl font-bold text-white mt-4">Scratch Earn</h1><p className="text-gray-400">Earn money daily without scams.</p>
+                </div>
+                <button onClick={onLogin} className="w-full bg-white text-gray-900 py-3 px-4 rounded-full font-bold flex items-center justify-center gap-3 hover:bg-gray-100 transition shadow-lg">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/5/53/Google_%22G%22_Logo.svg" className="w-6 h-6" />Continue with Google (Firebase)
+                </button>
+            </div>
+        );
 
-// Baaki sab components waise hi rahenge.
+        const HomeScreen = ({ user, onTask, timer }) => {
+            const [spinning, setSpinning] = useState(false);
+            const [scratched, setScratched] = useState(false);
+            
+            const handleSpin = () => { if(timer.active) return; setSpinning(true); setTimeout(() => { setSpinning(false); onTask('spin'); }, 3000); };
+            const handleScratch = () => { if(timer.active) return; setScratched(true); setTimeout(() => { setScratched(false); onTask('scratch'); }, 1500); };
+
+            const referLink = `https://your-app.netlify.app/?referrerId=${user.uid || 'USER_ID'}`;
+
+            return (
+                <div className="space-y-6">
+                    <div className="bg-gradient-to-r from-blue-600 to-blue-800 rounded-xl p-4 text-white shadow-lg relative overflow-hidden">
+                        <div className="relative z-10"><h3 className="font-bold text-lg">Refer & Earn</h3><p className="text-sm opacity-90">Get 200 coins per friend!</p><div className="mt-2 bg-black/30 p-2 rounded text-xs font-mono flex justify-between items-center"><span className="truncate">{referLink}</span><Icon name="copy" size={16} onClick={() => { navigator.clipboard.writeText(referLink); showToast("Link copied!"); }} /></div></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="bg-cardBg p-4 rounded-xl border border-gray-700 flex flex-col items-center relative overflow-hidden group">
+                            <h3 className="font-bold mb-2 text-gray-300">Scratch Card</h3>
+                            <div className="w-24 h-24 bg-gray-800 rounded-lg relative cursor-pointer" onClick={handleScratch}>
+                                <div className="absolute inset-0 flex items-center justify-center text-gold font-bold text-xl">+10 <Icon name="coin" weight="fill" className="ml-1"/></div>
+                                <div className={`absolute inset-0 bg-gradient-to-br from-gray-600 to-gray-500 flex items-center justify-center scratch-overlay ${scratched ? 'scratched' : ''}`}><Icon name="hand-grabbing" size={32} color="#e5e7eb" /></div>
+                            </div>
+                            {timer.active && timer.task === 'scratch' && (<div className="absolute inset-0 bg-black/80 z-20 flex flex-col items-center justify-center text-white"><span className="text-2xl font-bold">{timer.seconds}s</span><span className="text-xs">Cooldown</span></div>)}
+                        </div>
+                        <div className="bg-cardBg p-4 rounded-xl border border-gray-700 flex flex-col items-center relative overflow-hidden">
+                            <h3 className="font-bold mb-2 text-gray-300">Spin Wheel</h3>
+                            <div className="relative w-24 h-24"><div className={`w-full h-full rounded-full border-4 border-gold flex items-center justify-center bg-gray-800 ${spinning ? 'spinning' : ''}`}><div className="w-1 h-4 bg-red-500 absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 z-10"></div><Icon name="aperture" size={64} color="#DAA520" weight="duotone" /></div></div>
+                            <button onClick={handleSpin} disabled={spinning || (timer.active && timer.task === 'spin')} className="mt-3 bg-goldDark text-black font-bold text-xs px-4 py-2 rounded-full w-full">{spinning ? 'Spinning...' : 'SPIN NOW'}</button>
+                            {timer.active && timer.task === 'spin' && (<div className="absolute inset-0 bg-black/80 z-20 flex flex-col items-center justify-center text-white rounded-xl"><span className="text-2xl font-bold">{timer.seconds}s</span></div>)}
+                        </div>
+                    </div>
+                    <div className="flex justify-center mt-6"><a href="http://t.me/MASTEREARNNIK" target="_blank" className="bg-[#0088cc] p-3 rounded-full shadow-lg hover:scale-110 transition"><Icon name="telegram-logo" size={32} color="white" weight="fill" /></a></div>
+                </div>
+            );
+        }
+
+        const WalletScreen = ({ user, onWithdraw }) => {
+            const [upi, setUpi] = useState('');
+            return (
+                <div className="space-y-6">
+                    <div className="bg-gray-800 p-4 rounded-xl text-center border border-gray-700"><span className="text-gray-400 text-sm">Current Balance</span><div className="text-4xl font-bold text-gold my-2">{user.balance || 0}</div><div className="text-xs text-gray-500">100 Coins ≈ ₹1.6</div></div>
+                    <div className="space-y-2"><label className="text-xs text-gray-400 uppercase font-bold">Withdraw Details</label><input type="text" placeholder="Enter UPI ID or Email" className="w-full bg-gray-900 border border-gray-700 text-white p-3 rounded-lg focus:outline-none focus:border-gold" value={upi} onChange={(e) => setUpi(e.target.value)} /></div>
+                    <div className="grid grid-cols-1 gap-3">{[{ coins: 900, inr: 15 }, { coins: 4500, inr: 50 }, { coins: 9000, inr: 100 }].map((opt) => (<button key={opt.coins} onClick={() => { if(!upi) return alert("Please enter UPI ID first"); onWithdraw(opt.coins, upi) }} className="flex justify-between items-center bg-cardBg p-4 rounded-lg border border-gray-700 hover:border-gold transition group">
+        <div className="flex items-center gap-2"><div className="bg-gray-800 p-2 rounded-full"><Icon name="coin" color="#FFD700" weight="fill" /></div><div className="text-left">
+            <div className="font-bold text-white">{opt.coins} Coins</div>const NavBtn = ({ icon, label, active, onClick }) => (<button onClick={onClick} className={`flex flex-col items-center gap-1 w-16 ${active ? 'text-gold' : 'text-gray-500'}`}><Icon name={icon} weight={active ? 'fill' : 'regular'} size={24} /><span className="text-[10px] font-medium">{label}</span></button>);
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
