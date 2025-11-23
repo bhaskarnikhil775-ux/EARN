@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider, signInWithRedirect } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC2sVaRwL61ZKSM1dmLttbTrDXm-cQsgcI", 
@@ -16,7 +16,7 @@ const provider = new GoogleAuthProvider();
 
 window.handleGoogleLogin = async () => {
     try {
-        await signInWithRedirect(auth, provider);
+        await signInWithPopup(auth, provider);
     } catch (error) {
         console.error("Login Failed:", error);
         alert("Login failed. Check console for details.");
@@ -28,7 +28,7 @@ document.getElementById('root').innerHTML = `
     <h1>Scratch Earn App</h1>
     <p>App interface is loaded. Click below to sign in.</p>
     <button onclick="handleGoogleLogin()" style="padding: 10px 20px; background-color: #4285F4; color: white; border: none; border-radius: 4px; cursor: pointer;">
-        Continue with Google
+        Continue with Google (Popup)
     </button>
   </div>
 `;
